@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+.privacy-vault/
+*.json.tmp
