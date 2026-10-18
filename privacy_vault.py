@@ -191,21 +191,81 @@ _MAC_CHAIN_RE = re.compile(r"(?<![\w:])(?:[0-9A-Fa-f]{2}:){11}[0-9A-Fa-f]{2}(?::
 # parameter onto the value: an email vaulted as "33mjdoe@...", a MAC/host/credential
 # after a colour code skipped entirely (deep review #14). Stripped before detection.
 _ANSI_CSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
-_DOMAIN_TLDS = r"(?:edu|gov|com|net|org|us|io|ai|local|lan|internal|int)"
+def _trie_pattern(words) -> str:
+    """Regex for a set of literal strings as a radix trie: branches on the next char,
+    and a greedy optional tail prefers the longest value at each position."""
+    root: Dict[str, dict] = {}
+    for w in words:
+        node = root
+        for ch in w:
+            node = node.setdefault(ch, {})
+        node[""] = {}
+
+    def render(node) -> str:
+        parts = []
+        while True:
+            kids = [k for k in node if k]
+            if "" in node or len(kids) != 1:
+                break
+            parts.append(re.escape(kids[0]))  # single-child chain: plain literal, no group
+            node = node[kids[0]]
+        kids = sorted(k for k in node if k)
+        if kids:
+            branches = [re.escape(k) + render(node[k]) for k in kids]
+            body = branches[0] if len(branches) == 1 else "(?:" + "|".join(branches) + ")"
+            parts.append(f"(?:{body})?" if "" in node else body)
+        return "".join(parts)
+
+    return render(root)
+
+
+# [RT] TLDs. Until 2026-10-18 only 13 were known, so "update-check.top", "cdn.example.xyz",
+# "example.ru/a.ps1" and "mail.example.co.uk" passed through in clear -- attacker
+# infrastructure lives on exactly those. Now: every ccTLD, plus generic TLDs that are
+# common or commonly abused. Generic TLDs that are also common log FIELD names (name,
+# email, host, zone, group, company, ...) are deliberately left out: "user.name" is an ECS
+# key, not a domain. TLDs that double as file extensions or field names (.sh .py .md .id
+# .zip .app ...) need 3+ labels: "deploy.sh" and "user.id" stay, "cdn.evil.sh" does not.
+_CCTLDS = (
+    "ac ad ae af ag ai al am ao aq ar as at au aw ax az ba bb bd be bf bg bh bi bj bm bn bo br bs "
+    "bt bw by bz ca cc cd cf cg ch ci ck cl cm cn co cr cu cv cw cx cy cz de dj dk dm do dz ec ee "
+    "eg er es et eu fi fj fk fm fo fr ga gd ge gf gg gh gi gl gm gn gp gq gr gs gt gu gw gy hk hm "
+    "hn hr ht hu id ie il im in io iq ir is it je jm jo jp ke kg kh ki km kn kp kr kw ky kz la lb "
+    "lc li lk lr ls lt lu lv ly ma mc md me mg mh mk ml mm mn mo mp mq mr ms mt mu mv mw mx my mz "
+    "na nc ne nf ng ni nl no np nr nu nz om pa pe pf pg ph pk pl pm pn pr ps pt pw py qa re ro rs "
+    "ru rw sa sb sc sd se sg sh si sk sl sm sn so sr ss st su sv sx sy sz tc td tf tg th tj tk tl "
+    "tm tn to tr tt tv tw tz ua ug uk us uy uz va vc ve vg vi vn vu wf ws ye yt za zm zw"
+).split()
+_GTLDS = (
+    "com net org edu gov mil int local lan internal arpa info biz xyz top online site shop store "
+    "club website life world space tech fun today news blog click icu cyou buzz cloud dev mobi "
+    "asia bar cam lol monster quest sbs cfd bond one design agency center press best ink win vip "
+    "men loan party review trade science faith accountant cricket kim help game games tools wiki "
+    "lat skin beauty hair makeup boats homes autos mom baby fit sale deals market finance money "
+    "capital academy education school college university institute social chat video photo pics "
+    "art studio travel management consulting partners xin ltd llc solutions support digital "
+    "work page media live run"
+).split()
+# Also file extensions or field names: domain only with 3+ labels.
+_STRICT_TLDS = frozenset((
+    "ac am bz cc gd id in la md ml mm mk mo nc pl pm ps py rs sh so sv tf "
+    "app zip mov pub cab pro inc page media live run work"
+).split())
+_LOOSE_TLDS = (set(_CCTLDS) | set(_GTLDS)) - _STRICT_TLDS
+_DOMAIN_LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9\-]{0,61}[A-Za-z0-9])?\."
+_DOMAIN_BODY = (
+    r"(?:(?:" + _DOMAIN_LABEL + r"){2,}(?:" + _trie_pattern(_STRICT_TLDS)
+    + r")|(?:" + _DOMAIN_LABEL + r")+(?:" + _trie_pattern(_LOOSE_TLDS) + r"))(?![A-Za-z0-9\-])"
+)
 # Boundaries are alphanumeric/hyphen, not \b: "_" cannot occur in a domain, so in a
 # filename like "sync_corp.example.org_1.cache" it is a separator -- \b treated it as part
 # of the word and left the domain plaintext (large-export regression test, 2026-10-17).
-_DOMAIN_RE = re.compile(
-    r"(?<![A-Za-z0-9\-])(?:[A-Za-z0-9](?:[A-Za-z0-9\-]{0,61}[A-Za-z0-9])?\.)+"
-    r"" + _DOMAIN_TLDS + r"(?![A-Za-z0-9\-])",
-    re.IGNORECASE,
-)
+_DOMAIN_RE = re.compile(r"(?<![A-Za-z0-9\-])" + _DOMAIN_BODY, re.IGNORECASE)
 # [RT] A host + path with no scheme ("files.example.org/sites/hr/Shared%20Docs/x.xlsx").
 # The domain pass took the host, and the path regex will not start right after a token,
 # so the path stayed plaintext. Tokenised whole as a URL before either pass runs.
 _SCHEMELESS_URL_RE = re.compile(
-    r"(?<![\w./@:\-])(?:[A-Za-z0-9](?:[A-Za-z0-9\-]{0,61}[A-Za-z0-9])?\.)+" + _DOMAIN_TLDS
-    + r"(?::\d{1,5})?/[^\s\"'<>|\\,;`]+",
+    r"(?<![\w./@:\-])" + _DOMAIN_BODY + r"(?::\d{1,5})?/[^\s\"'<>|\\,;`]+",
     re.IGNORECASE,
 )
 # Conservative: absolute unix paths of >=2 segments, and Windows paths.
@@ -587,34 +647,6 @@ def _encoded_variants(value: str):
             seen.add(v)
             result.append((form, v))
     return result
-
-
-def _trie_pattern(words) -> str:
-    """Regex for a set of literal strings as a radix trie: branches on the next char,
-    and a greedy optional tail prefers the longest value at each position."""
-    root: Dict[str, dict] = {}
-    for w in words:
-        node = root
-        for ch in w:
-            node = node.setdefault(ch, {})
-        node[""] = {}
-
-    def render(node) -> str:
-        parts = []
-        while True:
-            kids = [k for k in node if k]
-            if "" in node or len(kids) != 1:
-                break
-            parts.append(re.escape(kids[0]))  # single-child chain: plain literal, no group
-            node = node[kids[0]]
-        kids = sorted(k for k in node if k)
-        if kids:
-            branches = [re.escape(k) + render(node[k]) for k in kids]
-            body = branches[0] if len(branches) == 1 else "(?:" + "|".join(branches) + ")"
-            parts.append(f"(?:{body})?" if "" in node else body)
-        return "".join(parts)
-
-    return render(root)
 
 
 def _join_key(parent: Optional[str], key: str) -> str:
@@ -2526,6 +2558,21 @@ def selftest() -> int:
         o = qv.protect("blob \x04ehttp://files.example.org/sites/x/doc1.docx\x02chttps://h.example.org/a/b")
         check("URL glued to a stray byte ('ehttp://') still tokenised", "sites/x" not in o and "/a/b" not in o, repr(o))
         check("filename with a non-TLD extension untouched", qv.protect("open settings.json/x") == "open settings.json/x")
+
+        print("\n[TLD coverage: ccTLDs, abused gTLDs, extension-like TLDs]")
+        tv2 = PrivacyVault(session="tlds")
+        for leak in ("c2 at update-check.top", "cdn.example.xyz", "files.example.info", "mail.example.co.uk",
+                     "portal.example.cloud", "beacon.example.ru", "x.example.de", "login.example.shop",
+                     "cdn.evil.sh", "a.b.zip", "drop.example.app"):
+            o = tv2.protect(leak)
+            host = leak.split()[-1]
+            check(f"domain tokenised: {host!r}", host not in o and "DOMAIN_" in o, o)
+        o = tv2.protect("stager example.ru/a.ps1 fetched")
+        check("schemeless URL on a ccTLD is one URL token", re.fullmatch(r"stager URL_\d{3,} fetched", o) is not None, o)
+        for keep in ("run deploy.sh then setup.py", "see notes.md and data.zip", "id_rsa.pub copied",
+                     "user.name, user.id, host.name, user.email, time.zone", "readme.txt and a.ps1",
+                     "props.page and job.run", "e.g. this, i.e. that"):
+            check(f"TLD left alone: {keep!r}", tv2.protect(keep) == keep, tv2.protect(keep))
 
         print("\n[gateway: block reasons never reveal]")
         secret = v.register(Category.CRED, "Hunter2Leak")
