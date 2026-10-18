@@ -27,14 +27,14 @@ file: encryption keeps values out of casual greps and backups-by-accident; the f
 permission is what actually protects it.
 
 Usage:
-  privacy_vault.py init [--session NAME] [--target HOST]...   # start a session, set scope
-  privacy_vault.py protect [--session NAME] [-]               # stdin/arg -> placeholdered text
-  privacy_vault.py register <CATEGORY> <value> [--session N]  # CRED/HASH/SERIAL/STUDENT_ID
-  privacy_vault.py register HOST_INTERNAL - < hosts.txt       # bulk: one value per line
-  privacy_vault.py check "<command>" [--session NAME]         # gateway verdict, no execution
-  privacy_vault.py rehydrate "<command>" [--session NAME]     # gateway verdict + real command
-  privacy_vault.py sanitize [--session NAME] [-]              # tool output -> placeholdered
-  privacy_vault.py status [--session NAME]
+  privacy_vault.py [--session NAME] init [--target HOST]...   # start a session, set scope
+  privacy_vault.py [--session NAME] protect [-]               # stdin/arg -> placeholdered text
+  privacy_vault.py [--session NAME] register <CATEGORY> <value>  # CRED/HASH/SERIAL/STUDENT_ID
+  privacy_vault.py [--session NAME] register HOST_INTERNAL - < hosts.txt  # bulk: one value per line
+  privacy_vault.py [--session NAME] check "<command>"         # gateway verdict, no execution
+  privacy_vault.py [--session NAME] rehydrate "<command>"     # gateway verdict + real command
+  privacy_vault.py [--session NAME] sanitize [-]              # tool output -> placeholdered
+  privacy_vault.py [--session NAME] status
   privacy_vault.py selftest
 """
 

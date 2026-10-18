@@ -31,7 +31,19 @@ python3 privacy_vault.py check     "nmap -sV IP_PRIVATE_001"   # ALLOW / BLOCK: 
 python3 privacy_vault.py rehydrate "nmap -sV IP_PRIVATE_001"   # prints the real, quoted command
 ```
 
-`--session NAME` keeps engagements apart.
+`--session NAME` (before the subcommand) keeps engagements apart.
+
+## Using it with an AI agent
+
+`skills/privacy-vault/SKILL.md` tells an agent when and how to use the tool. It uses the open
+`SKILL.md` format, so it works in several agents:
+
+- **Claude Code:** `ln -s "$PWD/skills/privacy-vault" ~/.claude/skills/`
+- **OpenAI Codex:** `ln -s "$PWD/skills/privacy-vault" ~/.agents/skills/`
+- **Anything else:** point the agent at the file.
+
+The skill finds `privacy_vault.py` two directories above itself, so keep the repository intact and
+symlink the folder rather than copying it.
 
 ## What it detects
 
