@@ -27,6 +27,8 @@ python3 privacy_vault.py selftest   # ~300 checks
 python3 privacy_vault.py init --target example.org --target 10.99.17.0/24
 python3 privacy_vault.py register CRED -  < creds.txt        # one per line, kept out of shell history
 some-tool | python3 privacy_vault.py sanitize > safe.txt
+python3 privacy_vault.py sanitize-file export.csv export.sanitized.csv  # files: refuses empty output, audits result
+python3 privacy_vault.py audit export.sanitized.csv                     # leftover candidates: counts + line numbers only
 python3 privacy_vault.py check     "nmap -sV IP_PRIVATE_001"   # ALLOW / BLOCK: reason
 python3 privacy_vault.py rehydrate "nmap -sV IP_PRIVATE_001"   # prints the real, quoted command
 ```
@@ -57,6 +59,10 @@ nested JSON and Python reprs).
 
 - **Detection uses heuristics.** It is tuned to leak less, not to be pretty, and it will
   still miss things. Review anything that matters before you share it.
+- **Use `sanitize-file` for files.** It refuses to write an empty or truncated result (a silent empty output once
+  passed a "nothing left" check), and audits what it wrote: exit code 2 means leftover candidates, such as
+  uppercase server names in an unlabelled column, which no rule tokenizes automatically. Review them and
+  `register HOST_INTERNAL -` the real ones. The audit prints counts and line numbers only, never values.
 - **Credentials are protected only once you register them.** Nothing tries to guess what a
   password looks like.
 - **The key is stored in the vault file.** Each session file

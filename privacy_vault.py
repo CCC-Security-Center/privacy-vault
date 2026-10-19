@@ -34,6 +34,8 @@ Usage:
   privacy_vault.py [--session NAME] check "<command>"         # gateway verdict, no execution
   privacy_vault.py [--session NAME] rehydrate "<command>"     # gateway verdict + real command
   privacy_vault.py [--session NAME] sanitize [-]              # tool output -> placeholdered
+  privacy_vault.py [--session NAME] sanitize-file IN OUT     # safe file mode: refuses empty output, audits result
+  privacy_vault.py audit [FILE|-]                            # leftover-identifier candidates (no values printed)
   privacy_vault.py [--session NAME] status
   privacy_vault.py selftest
 """
@@ -372,7 +374,29 @@ _FIELD_PRESERVE = frozenset({
     # learned from "Hostname: it's the same box" and then replaced everywhere).
     "it", "its", "the", "a", "an", "is", "was", "this", "that", "same", "see", "yes", "no",
     "tbd", "ok", "none", "any", "all", "both", "either", "here", "there", "below", "above",
+    # [RT] Device-class and platform words. Activity exports put these in a "Device" column
+    # (PC / Mobile / Other); learned as HOST_INTERNAL they were then replaced inside every app
+    # name ("Outlook Mobile" -> "Outlook HOST_INTERNAL_003"), 2026-10-18.
+    "pc", "mobile", "other", "desktop", "laptop", "tablet", "phone", "iphone", "ipad", "android",
+    "ios", "ipados", "windows", "macos", "mac", "linux", "chromeos", "browser", "server",
+    "workstation", "virtual", "cloud", "web", "client", "device", "computer", "unmanaged", "managed",
 })
+# [RT] A multi-word value containing product vocabulary is an app or service name sitting in a
+# name field ("AccountDisplayName": "One Outlook Web"), not a person or host. Learned as USER it
+# was replaced in every later app reference. Single words still go through _FIELD_PRESERVE.
+_APP_NAME_WORDS = frozenset({
+    "outlook", "teams", "office", "microsoft", "exchange", "sharepoint", "onedrive", "azure", "entra",
+    "defender", "intune", "copilot", "web", "app", "apps", "service", "services", "portal", "client",
+    "online", "connector", "graph", "sync", "agent", "platform", "gateway", "api",
+})
+
+
+def _looks_like_app_name(v: str) -> bool:
+    # Spaces required: hostnames never contain them, so "web-srv-01" or "app-02" still get learned.
+    if " " not in v.strip():
+        return False
+    words = re.findall(r"[a-z]+", v.lower())
+    return len(words) >= 2 and any(w in _APP_NAME_WORDS for w in words)
 _DOMAIN_USER_RE = re.compile(r"[A-Za-z][\w.\-]{1,14}\\[\w.\-]{1,63}\$?")
 # Fields whose value is a whole name with spaces ("displayName: John Smith"): the bare
 # value runs to the end of the line instead of stopping at the first space (#15).
@@ -423,6 +447,8 @@ def _field_value_ok(val: str) -> bool:
     # name in a 4624 is chosen by the client). A value that starts with "-" would rehydrate
     # as an OPTION; one with "/" or ":" spoofs a host or path. Neither is a name.
     if v.startswith("-") or "/" in v or ":" in v:
+        return False
+    if _looks_like_app_name(v):
         return False
     return True
 
@@ -1971,6 +1997,80 @@ class CommandGateway:
 # Self-test
 # --------------------------------------------------------------------------
 
+# --------------------------------------------------------------------------
+# Audit + safe file sanitising  [RT] (2026-10-18)
+# --------------------------------------------------------------------------
+# Two failures seen in real use: a sanitize run that silently produced EMPTY output (a shell
+# quoting slip upstream) while a "0 identifiers left" check passed on the empty files; and
+# internal server names in an unlabelled column ("Application") that no rule recognises.
+# sanitize-file refuses the first; audit flags the second for review without printing values.
+
+# Uppercase host-style names: letters + digits, hyphen-separated ("HSLH324-VMLEWIS", "DTLSSP-01").
+# Review-only: these are not auto-tokenised (too many false positives in free text).
+_HOSTLIKE_RE = re.compile(r"(?<![\w-])(?=[A-Z0-9-]*\d)(?=[A-Z0-9-]*[A-Z]{2})[A-Z][A-Z0-9]{1,14}(?:-[A-Z0-9]{1,14}){1,3}(?![\w-])")
+_HOSTLIKE_IGNORE = ("CVE-", "CWE-", "SHA-", "AES-", "UTF-", "ISO-", "RFC", "TLS", "SSL", "HTTP", "KB", "MS-",
+                    "TCP-", "UDP-", "RSA-", "DES-", "IPV", "X509", "T1", "TA0", "GHSA-", "MITRE")
+
+
+def audit_text(text: str) -> Dict[str, List[int]]:
+    """Leftover identifier candidates in already-sanitised text: kind -> line numbers.
+
+    Values are deliberately not returned: the audit runs where a model or a person reads the
+    result, so it must not reintroduce what it is checking for."""
+    found: Dict[str, List[int]] = {}
+
+    def hit(kind: str, n: int) -> None:
+        found.setdefault(kind, []).append(n)
+
+    for n, line in enumerate(text.splitlines(), 1):
+        for m in _DOTTED_RUN_RE.finditer(line):
+            if _ipv4_part(m.group(0)):
+                hit("ipv4", n)
+        for m in _IPV6_RE.finditer(line):
+            if classify_ip(m.group(0).split("%")[0]):
+                hit("ipv6", n)
+        if _EMAIL_RE.search(line):
+            hit("email", n)
+        if _URL_RE.search(line):
+            hit("url", n)
+        if _DOMAIN_RE.search(line):
+            hit("domain", n)
+        for m in _HOSTLIKE_RE.finditer(line):
+            if not m.group(0).startswith(_HOSTLIKE_IGNORE):
+                hit("hostname-like", n)
+    return found
+
+
+def sanitize_file(vault: "PrivacyVault", src: Path, dst: Path) -> Tuple[int, dict]:
+    """Sanitise src into dst. Returns (exit_code, summary). Never writes an empty or truncated result.
+
+    exit 0 = written, audit clean; 2 = written, audit found candidates to review;
+    3 = refused (nothing written)."""
+    summary: dict = {"input": str(src), "output": str(dst)}
+    if src.resolve() == dst.resolve():
+        summary["error"] = "output path is the input path"
+        return 3, summary
+    text = src.read_text(encoding="utf-8", errors="replace")
+    if not text.strip():
+        summary["error"] = "input is empty"
+        return 3, summary
+    before = dict(vault.state.counters)
+    out = vault.sanitize(text)
+    summary["lines_in"], summary["lines_out"] = text.count("\n"), out.count("\n")
+    if not out.strip():
+        summary["error"] = "sanitised output is empty"
+        return 3, summary
+    if summary["lines_in"] != summary["lines_out"]:
+        summary["error"] = "line count changed during sanitising"
+        return 3, summary
+    dst.write_text(out, encoding="utf-8")
+    vault.save()
+    summary["new_tokens"] = {k: v - before.get(k, 0) for k, v in vault.state.counters.items() if v != before.get(k, 0)}
+    audit = audit_text(out)
+    summary["audit"] = {k: {"count": len(v), "lines": v[:10]} for k, v in audit.items()}
+    return (2 if audit else 0), summary
+
+
 def selftest() -> int:
     import tempfile
     from contextlib import redirect_stdout as contextlib_redirect
@@ -2589,6 +2689,39 @@ def selftest() -> int:
         out = v.sanitize("Nmap scan report for 10.99.17.73\nOpen: 443")
         check("stdout re-tokenised", "10.99.17.73" not in out and "IP_PRIVATE_001" in out, out)
 
+        print("\n[field learning: generic device words and app names]  2026-10-18")
+        fl = PrivacyVault(session="fieldlearn")
+        o = fl.protect("Device,User,Location\nMobile,jroe7,US\nPC,jroe7,US\n")
+        check("device-class value 'Mobile' not learned as a host", "HOST_INTERNAL_" not in o, o)
+        check("app name keeps 'Mobile' afterwards", fl.protect("Outlook Mobile signed in") == "Outlook Mobile signed in")
+        fl.protect('{"AccountDisplayName": "One Outlook Web", "ActionType": "x"}')
+        check("app name in a name field not learned", fl.protect("via One Outlook Web") == "via One Outlook Web")
+        o = fl.protect("host=web-srv-01 then web-srv-01 rebooted")
+        check("hyphenated hostname with an app word still learned", "web-srv-01" not in o, o)
+        o = fl.protect("displayName: Jane Roe\nJane Roe logged in")
+        check("person display name still learned", "Jane Roe" not in o, o)
+
+        print("\n[audit + sanitize-file]  2026-10-18")
+        check("audit flags a host-style name", "hostname-like" in audit_text("Application: HSLH999-VMTEST01\n"))
+        check("audit ignores CVE / SHA / ATT&CK ids", audit_text("CVE-2024-3400 SHA-256 T1078.004 TA0001\n") == {})
+        check("audit clean on placeholder-only text", audit_text("IP_PRIVATE_001 USER_002 HOST_INTERNAL_003\n") == {})
+        check("audit returns line numbers, not values", audit_text("ok\nmail a@b.example.org\n").get("email") == [2])
+        sv = PrivacyVault(session="sfile")
+        sfd = Path(VAULT_DIR)
+        src, dst, empty = sfd / "in.csv", sfd / "out.csv", sfd / "empty.csv"
+        src.write_text("User,Status,IP\njdoe9,ok,10.99.17.73\nkroe8,ok,203.0.113.5\n"); empty.write_text("")
+        code, summ = sanitize_file(sv, src, dst)
+        out = dst.read_text()
+        check("sanitize-file writes, keeps line count, leaves no IP",
+              code == 0 and summ["lines_in"] == summ["lines_out"] == 3 and "10.99.17.73" not in out and "jdoe9" not in out, str(summ))
+        code, summ = sanitize_file(sv, empty, sfd / "e_out.csv")
+        check("sanitize-file refuses empty input, writes nothing", code == 3 and not (sfd / "e_out.csv").exists(), str(summ))
+        code, summ = sanitize_file(sv, src, src)
+        check("sanitize-file refuses output == input", code == 3 and "jdoe9" in src.read_text(), str(summ))
+        src.write_text("Application,Status\nHSLH999-VMTEST01,ok\n")
+        code, summ = sanitize_file(sv, src, dst)
+        check("sanitize-file returns 2 when the audit finds host-like names", code == 2 and "hostname-like" in summ["audit"], str(summ))
+
         print("\n[storage]")
         v.save()
         check("vault outside the working tree", Path.cwd().resolve() not in v.path.resolve().parents)
@@ -2626,6 +2759,10 @@ def main() -> int:
     p_reg = sub.add_parser("register"); p_reg.add_argument("category"); p_reg.add_argument("value")
     p_chk = sub.add_parser("check"); p_chk.add_argument("command")
     p_reh = sub.add_parser("rehydrate"); p_reh.add_argument("command")
+    p_sf = sub.add_parser("sanitize-file", help="sanitise IN into OUT; refuses empty/truncated output; audits the result")
+    p_sf.add_argument("infile"); p_sf.add_argument("outfile")
+    p_au = sub.add_parser("audit", help="report leftover identifier candidates (counts + line numbers, never values)")
+    p_au.add_argument("file", nargs="?", default="-")
     sub.add_parser("status")
     sub.add_parser("selftest")
 
@@ -2636,7 +2773,22 @@ def main() -> int:
         p.print_help()
         return 0
 
+    if args.cmd == "audit":
+        found = audit_text(_read_input(args.file) if args.file == "-" else Path(args.file).read_text(errors="replace"))
+        print(json.dumps({k: {"count": len(v), "lines": v[:10]} for k, v in found.items()}, indent=2))
+        return 2 if found else 0
+
     vault = PrivacyVault(session=args.session)
+
+    if args.cmd == "sanitize-file":
+        code, summary = sanitize_file(vault, Path(args.infile), Path(args.outfile))
+        print(json.dumps(summary, indent=2), file=sys.stderr)
+        if code == 3:
+            print(f"REFUSED: {summary.get('error')}", file=sys.stderr)
+        elif code == 2:
+            print("WRITTEN, but the audit found leftover identifier candidates: review those lines, "
+                  "register real ones (register HOST_INTERNAL -) and re-run", file=sys.stderr)
+        return code
 
     if args.cmd == "init":
         vault.state.targets = sorted(set(vault.state.targets) | set(args.target))
