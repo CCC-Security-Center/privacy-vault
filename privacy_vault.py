@@ -35,6 +35,7 @@ Usage:
   privacy_vault.py [--session NAME] rehydrate "<command>"     # gateway verdict + real command
   privacy_vault.py [--session NAME] sanitize [-]              # tool output -> placeholdered
   privacy_vault.py [--session NAME] sanitize-file IN OUT     # safe file mode: refuses empty output, audits result
+  privacy_vault.py [--session NAME] sanitize-file --ndjson IN OUT  # JSON-lines exports: lines stay valid JSON
   privacy_vault.py audit [FILE|-]                            # leftover-identifier candidates (no values printed)
   privacy_vault.py [--session NAME] status
   privacy_vault.py selftest
@@ -2071,6 +2072,74 @@ def sanitize_file(vault: "PrivacyVault", src: Path, dst: Path) -> Tuple[int, dic
     return (2 if audit else 0), summary
 
 
+def sanitize_ndjson_file(vault: "PrivacyVault", src: Path, dst: Path) -> Tuple[int, dict]:
+    """sanitize_file for JSON-lines exports (Falcon LogScale / NG-SIEM, ECS). Same contract and exit codes.
+
+    [RT] 2026-10-30: on a real JSON-lines export the text pass broke about a quarter of the lines. A PATH match
+    on JSON-escaped text ends in the "\\" of a closing \\" or splits a "\\\\" pair, so the line no
+    longer parses. Here each line is decoded, every key and string value is protected on its own,
+    and the line is re-serialised. Discovery runs over every line first, so a name learned on a late
+    line is also replaced on an early one. A line that is not JSON falls back to the text pass."""
+    summary: dict = {"input": str(src), "output": str(dst)}
+    if src.resolve() == dst.resolve():
+        summary["error"] = "output path is the input path"
+        return 3, summary
+    text = src.read_text(encoding="utf-8", errors="replace")
+    if not text.strip():
+        summary["error"] = "input is empty"
+        return 3, summary
+    before = dict(vault.state.counters)
+    active = vault.active_categories
+    lines = text.split("\n")
+    objs: List[Optional[object]] = []
+    for line in lines:
+        try:
+            obj = json.loads(line) if line.strip() else None
+        except (ValueError, RecursionError):
+            obj = None
+        if isinstance(obj, (dict, list)):
+            vault._walk_json(obj, None, False, active, 0)
+        else:
+            obj = None
+        objs.append(obj)
+    memo: Dict[str, str] = {}
+
+    def leaf(s: str) -> str:
+        if s not in memo:
+            memo[s] = vault.protect(s)
+        return memo[s]
+
+    def rebuild(o):
+        if isinstance(o, dict):
+            return {leaf(k): rebuild(v) for k, v in o.items()}
+        if isinstance(o, list):
+            return [rebuild(v) for v in o]
+        return leaf(o) if isinstance(o, str) else o
+
+    out_lines, fallback = [], 0
+    for line, obj in zip(lines, objs):
+        if obj is None:
+            fallback += bool(line.strip())
+            out_lines.append(vault.protect(line) if line.strip() else line)
+        else:
+            out_lines.append(json.dumps(rebuild(obj), ensure_ascii=False, separators=(",", ":")))
+    out = "\n".join(out_lines)
+    summary["lines_in"], summary["lines_out"] = text.count("\n"), out.count("\n")
+    summary["non_json_lines"] = fallback
+    if not out.strip():
+        summary["error"] = "sanitised output is empty"
+        return 3, summary
+    if summary["lines_in"] != summary["lines_out"]:
+        summary["error"] = "line count changed during sanitising"
+        return 3, summary
+    dst.write_text(out, encoding="utf-8")
+    vault.save()
+    summary["new_tokens"] = {k: v - before.get(k, 0) for k, v in vault.state.counters.items() if v != before.get(k, 0)}
+    audit = audit_text(out)
+    summary["audit"] = {k: {"count": len(v), "lines": v[:10]} for k, v in audit.items()}
+    return (2 if audit else 0), summary
+
+
 def selftest() -> int:
     import tempfile
     from contextlib import redirect_stdout as contextlib_redirect
@@ -2722,6 +2791,27 @@ def selftest() -> int:
         code, summ = sanitize_file(sv, src, dst)
         check("sanitize-file returns 2 when the audit finds host-like names", code == 2 and "hostname-like" in summ["audit"], str(summ))
 
+        print("\n[sanitize-file --ndjson]  2026-10-30")
+        src.write_text(json.dumps({"CommandLine": 'cmd /c dir "C:\\inetpub\\wwwroot\\" & ver', "UserName": "asmith7"}) + "\n"
+                       + json.dumps({"@rawstring": json.dumps({"UserName": "bnguyen3", "Path": "C:\\Users\\bnguyen3\\x.aspx"})}) + "\n"
+                       + "not json 10.99.17.73\n")
+        broken = sv.protect(src.read_text()).splitlines()
+        code, summ = sanitize_ndjson_file(sv, src, dst)
+        out = dst.read_text().splitlines()
+
+        def parses(line):
+            try:
+                json.loads(line)
+                return True
+            except ValueError:
+                return False
+        check("text pass breaks escaped Windows paths (the defect)", not all(parses(l) for l in broken[:2]), str(broken[:2]))
+        check("ndjson lines stay valid JSON", all(parses(l) for l in out[:2]), str(out[:2]))
+        check("ndjson: name fields and nested @rawstring names tokenised",
+              "asmith7" not in "\n".join(out) and "bnguyen3" not in "\n".join(out), str(out))
+        check("ndjson: non-JSON line falls back to the text pass",
+              summ.get("non_json_lines") == 1 and "10.99.17.73" not in out[2] and summ["lines_in"] == summ["lines_out"], str(summ))
+
         print("\n[storage]")
         v.save()
         check("vault outside the working tree", Path.cwd().resolve() not in v.path.resolve().parents)
@@ -2761,6 +2851,8 @@ def main() -> int:
     p_reh = sub.add_parser("rehydrate"); p_reh.add_argument("command")
     p_sf = sub.add_parser("sanitize-file", help="sanitise IN into OUT; refuses empty/truncated output; audits the result")
     p_sf.add_argument("infile"); p_sf.add_argument("outfile")
+    p_sf.add_argument("--ndjson", action="store_true",
+                      help="JSON-lines input: protect each key/string value and re-serialise, so lines stay valid JSON")
     p_au = sub.add_parser("audit", help="report leftover identifier candidates (counts + line numbers, never values)")
     p_au.add_argument("file", nargs="?", default="-")
     sub.add_parser("status")
@@ -2781,7 +2873,7 @@ def main() -> int:
     vault = PrivacyVault(session=args.session)
 
     if args.cmd == "sanitize-file":
-        code, summary = sanitize_file(vault, Path(args.infile), Path(args.outfile))
+        code, summary = (sanitize_ndjson_file if args.ndjson else sanitize_file)(vault, Path(args.infile), Path(args.outfile))
         print(json.dumps(summary, indent=2), file=sys.stderr)
         if code == 3:
             print(f"REFUSED: {summary.get('error')}", file=sys.stderr)
