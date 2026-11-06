@@ -1,6 +1,6 @@
 ---
 name: privacy-vault
-description: Tokenize sensitive engagement data (IPs, hostnames, usernames, emails, domains, paths, registered credentials) before it is shown to a model, written to a shared file, or sent to a third party, and gate commands that need the real values. Use whenever log excerpts, tool output or case data would leave the local machine or enter a shared report.
+description: Pseudonymize identities in structured engagement data (IPs, hostnames, usernames, emails, domains, paths, registered credentials) before it is written to a shared file or sent to a third party, and gate commands that need the real values. Use for log exports, tool output and other structured case data that will leave the local machine or enter a shared report. Not a protection for prose documents or file content, and not a boundary against the model provider.
 ---
 
 # privacy-vault
@@ -12,10 +12,21 @@ local vault, and only puts real values back into a command once a policy check h
 Locate the script: it sits at the repository root, two levels above this file
 (`../../privacy_vault.py`). Use its absolute path in commands.
 
+## What it can and cannot do
+
+- **Can:** reliably tokenize identities in structured exports (CSV/TSV/JSON/JSON-lines with labeled
+  columns or keys), shaped values (IPs, emails, URLs, domains, paths, MACs) anywhere, and anything registered.
+- **Cannot:** protect prose. In tickets, emails, chats and documents, names are caught only if the session
+  already learned them from a labeled field. Phone numbers, addresses and unregistered IDs pass through,
+  and the content itself (what happened, to whom) is never hidden.
+- **Is not** a boundary against the model provider. What you read reaches the provider; sanitizing first only
+  reduces it. If a file may not leave the machine, do not read it at all. Tell the user instead of sanitizing
+  it and reading the result.
+
 ## When to use it
 
-- **Before** pasting log excerpts, tool output or case files into anything that leaves the
-  machine: another AI service, a ticket, an email, a shared report.
+- **Before** pasting log excerpts, tool output or structured case files into anything that leaves
+  the machine: a ticket, an email, a shared report, a third-party service.
 - **When writing** a report or note into a shared or synced folder.
 - **When you hold a credential, hash or ID** that must never appear in output: register it first.
 

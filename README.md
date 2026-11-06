@@ -1,8 +1,35 @@
 # privacy-vault
 
-A privacy vault and command gateway for offensive-security and IR work. It keeps engagement
-data (internal IPs, hostnames, usernames, credentials) out of anything that leaves your
-machine: LLM prompts, logs, shared reports, third-party tools.
+A privacy vault and command gateway for offensive-security and IR work. It pseudonymises the
+identities in **structured** engagement data (internal IPs, hostnames, usernames, emails, registered
+credentials) before that data goes into a shared report, a log, a ticket or a third-party tool, and it
+checks commands before real values are put back into them.
+
+## What it is, and what it is not
+
+**It is good at:**
+
+- **Structured exports:** sign-in logs, device timelines, SIEM/EDR query results and other CSV, TSV,
+  JSON or JSON-lines data. Column and key names say which value is a user, a host or an address, so
+  those values are tokenised reliably.
+- **Values with a recognisable shape** anywhere in text: IPs, MACs, emails, URLs, domains, paths,
+  `DOMAIN\user`, LDAP DNs.
+- **Values you register:** credentials, hashes, serials and IDs, including encoded copies of them.
+- **Gating outbound commands:** a protected value is only released to an in-scope target.
+
+**It is not:**
+
+- **Protection for prose or for content.** Tickets, emails, chat logs, case notes and documents
+  come out pseudonymised at best. A person's name in free text is caught only when the same session
+  has already learned it from a labelled field. Phone numbers, street addresses and unregistered
+  IDs pass through. Nothing hides *what* a file says, and the context alone often identifies the
+  person.
+- **A boundary against your AI provider.** Whatever reaches a model's context reaches that
+  provider. The vault reduces what gets there only when you sanitise before the model reads.
+  Unsanitised tool output, search results and pasted text go through as they are. If data may not
+  leave the machine, keep it away from hosted models. Sanitising does not make it safe to send.
+- **Complete, even for logs.** Free-text fields inside structured data (email subjects, command
+  lines, URLs, alert descriptions) are weak spots. So are export formats the rules haven't seen yet.
 
 - **`protect` / `sanitize`** swap sensitive values for stable placeholders
   (`IP_PRIVATE_001`, `USER_003`, `HOST_INTERNAL_007`). Within a session the same value always
@@ -67,6 +94,8 @@ nested JSON and Python reprs).
   For JSON-lines exports (one JSON object per line, as SIEM and EDR exports often are) add `--ndjson`:
   each key and string value is tokenized on its own and the line is re-serialised, so it still parses.
   The plain text pass can break escaped Windows paths and leave lines that no longer parse.
+- **Prose is not covered.** See "What it is not" above. For narrative files, sanitising is a
+  courtesy, not a control.
 - **Credentials are protected only once you register them.** Nothing tries to guess what a
   password looks like.
 - **The key is stored in the vault file.** Each session file

@@ -21,6 +21,13 @@ Why this exists: "no secrets, live creds, or PII in logs or in text handed to th
 is a common engagement rule with no enforcement behind it. A rule that only lives in a prompt
 is a suggestion.
 
+Scope: an identity pseudonymiser for STRUCTURED data (labelled columns/keys in log and SIEM/EDR
+exports, shaped values like IPs/emails/paths anywhere, registered secrets) plus an outbound command
+gateway. It does not protect prose or content: names in free text are caught only once learned from
+a labelled field, phone numbers/addresses/unregistered IDs pass through, and what a file says is never
+hidden. It is not a boundary against a model provider: what reaches a model's context reaches the
+provider, and sanitising only reduces that when it happens before the read.
+
 The vault DB lives at ~/.privacy-vault/<session>.json (override: PRIVACY_VAULT_DIR), mode
 0600. Keep it outside any git repo or shared folder. The Fernet key is stored in the same
 file: encryption keeps values out of casual greps and backups-by-accident; the file
